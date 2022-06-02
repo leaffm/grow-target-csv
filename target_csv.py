@@ -16,7 +16,11 @@ import pkg_resources
 from jsonschema.validators import Draft4Validator
 import singer
 
+DEFAULT_PARENT_KEY = ''
+SEP = '__'
+
 logger = singer.get_logger()
+
 
 def emit_state(state):
     if state is not None:
@@ -25,18 +29,34 @@ def emit_state(state):
         sys.stdout.write("{}\n".format(line))
         sys.stdout.flush()
 
-def flatten(d, parent_key='', sep='__'):
+
+def flatten(d, parent_key=DEFAULT_PARENT_KEY, sep=SEP):
     items = []
     for k, v in d.items():
-        new_key = parent_key + sep + k if parent_key else k
+        new_key = generate_key(parent_key, sep, k)
         items.append((new_key, str(v) if type(v) is list else v))
     return dict(items)
-        
+
+
+def get_headers(schema, parent_key=DEFAULT_PARENT_KEY, sep=SEP):
+    headers = []
+    for k, v in schema.get('properties', {}).items():
+        new_key = generate_key(parent_key, sep, k)
+        if v.get('type') == 'object':
+            headers = headers + get_headers(v, new_key, sep=sep)
+        else:
+            headers.append(new_key)
+    return list(headers)
+
+
+def generate_key(parent_key, sep, key):
+    return parent_key + sep + key if parent_key else key
+
+
 def persist_messages(delimiter, quotechar, messages, destination_path):
     state = None
     schemas = {}
     key_properties = {}
-    headers = {}
     validators = {}
 
     now = datetime.now().strftime('%Y%m%dT%H%M%S')
@@ -56,24 +76,17 @@ def persist_messages(delimiter, quotechar, messages, destination_path):
             validators[o['stream']].validate(o['record'])
 
             filename = o['stream'] + '-' + now + '.csv'
-            filename = os.path.expanduser(os.path.join(destination_path, filename))
-            file_is_empty = (not os.path.isfile(filename)) or os.stat(filename).st_size == 0
+            filename = os.path.expanduser(
+                os.path.join(destination_path, filename))
+            file_is_empty = (not os.path.isfile(filename)
+                             ) or os.stat(filename).st_size == 0
 
             flattened_record = flatten(o['record'])
 
-            if o['stream'] not in headers and not file_is_empty:
-                with open(filename, 'r') as csvfile:
-                    reader = csv.reader(csvfile,
-                                        delimiter=delimiter,
-                                        quotechar=quotechar)
-                    first_line = next(reader)
-                    headers[o['stream']] = first_line if first_line else flattened_record.keys()
-            else:
-                headers[o['stream']] = flattened_record.keys()
-
+            headers = get_headers(schemas[o['stream']])
             with open(filename, 'a') as csvfile:
                 writer = csv.DictWriter(csvfile,
-                                        headers[o['stream']],
+                                        headers,
                                         extrasaction='ignore',
                                         delimiter=delimiter,
                                         quotechar=quotechar)
@@ -93,7 +106,7 @@ def persist_messages(delimiter, quotechar, messages, destination_path):
             key_properties[stream] = o['key_properties']
         else:
             logger.warning("Unknown message type {} in message {}"
-                            .format(o['type'], o))
+                           .format(o['type'], o))
 
     return state
 
